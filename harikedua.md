@@ -1,4 +1,4 @@
-# Hari 2 — WiFi + ThingSpeak + Aktuator
+# Hari 2 — Blynk IoT + DHT + LED RGB + Buzzer
 
 > **Durasi:** 2 Jam | **Format:** Langsung Praktek
 
@@ -7,203 +7,298 @@
 ## Alur Hari 2
 
 ```
-[0:00–0:20]  Buat Akun ThingSpeak + Channel + API Key
+[0:00–0:20]  Install Blynk + Buat Akun, Template, Auth Token
       ↓
-[0:20–0:50]  Konek WiFi + Kirim Data ke ThingSpeak
+[0:20–0:40]  Konek ESP32 ke Blynk via WiFi
       ↓
-[0:50–1:20]  Pilih & Hubungkan Aktuator
+[0:40–1:00]  Kirim Data DHT ke Dashboard Blynk
       ↓
-[1:20–1:40]  Integrasi Penuh — Satu Sketch
+[1:00–1:40]  Aktuator — LED RGB + Buzzer + Update Status di Blynk
       ↓
 [1:40–2:00]  Bentuk Kelompok + Tentukan Project
 ```
 
 ---
 
-## 1. Setup ThingSpeak `[0:00 – 0:20]`
+## Kenapa Blynk?
 
-### 1.1 Buat Akun & Channel
-
-1. Buka **thingspeak.com** → klik **Sign Up** (gratis, pakai akun MathWorks)
-2. **Channels → My Channels → New Channel**
-3. Isi:
-   - Name: nama project kamu
-   - Field 1: `Suhu`
-   - Field 2: `Kelembapan`
-4. Klik **Save Channel**
-
-### 1.2 Dapat API Key
-
-- Tab **API Keys** → copy **Write API Key**
-- Contoh: `ABCDEFGH12345678`
-- Catat juga **Channel ID** (tertera di atas halaman)
-
-### 1.3 Cara Kerja
-
-```
-ESP32 → HTTP GET → api.thingspeak.com/update?api_key=...&field1=suhu&field2=lembap
-                                    ↓
-                            ThingSpeak simpan → tampil grafik di browser
-```
-
-> Limit update: **minimal 15 detik** per request. Response 200 = sukses.
+| Fitur | Keterangan |
+|-------|------------|
+| Dashboard di HP | Monitor suhu & kelembapan real-time dari Android/iOS |
+| Setup cepat | Tidak perlu server, cukup Auth Token |
+| Widget drag & drop | Gauge, Label, LED indicator, Button, Chart |
+| Notifikasi | Bisa kirim notif ke HP kalau suhu melewati threshold |
 
 ---
 
-## 2. Kode: WiFi + ThingSpeak `[0:20 – 0:50]`
+## 1. Setup Blynk `[0:00 – 0:20]`
+
+### 1.1 Install App & Buat Akun
+
+1. Download **Blynk IoT** di Google Play / App Store
+2. Buat akun gratis dengan email
+3. Buka **blynk.cloud** di browser → login dengan akun yang sama
+
+### 1.2 Buat Template
+
+1. **Developer Zone → New Template**
+2. Name: `Monitor DHT` | Hardware: `ESP32` | Connection: `WiFi` → Done
+
+### 1.3 Buat Datastream (Virtual Pin)
+
+**Template → Datastreams → New Datastream → Virtual Pin**
+
+| Virtual Pin | Nama | Tipe | Unit |
+|-------------|------|------|------|
+| V0 | Suhu | Double | °C |
+| V1 | Kelembapan | Double | % |
+| V2 | Status LED | Integer | 0/1 |
+| V3 | Status Buzzer | Integer | 0/1 |
+
+### 1.4 Buat Device & Dapat Auth Token
+
+1. **Devices → New Device → From Template** → pilih *Monitor DHT*
+2. Copy **Auth Token** yang muncul — simpan, tidak bisa dilihat lagi
+
+### 1.5 Setup Widget di Blynk App
+
+| Widget | Datastream | Setting |
+|--------|-----------|---------|
+| Gauge | V0 Suhu | Min: 0, Max: 50, Unit: °C |
+| Gauge | V1 Kelembapan | Min: 0, Max: 100, Unit: % |
+| LED Widget | V2 Status LED | Warna: hijau |
+| LED Widget | V3 Status Buzzer | Warna: merah |
+
+---
+
+## 2. Kode: Konek Blynk `[0:20 – 0:40]`
+
+### Install Library
+
+Library Manager → search **Blynk** → by Volodymyr Shymanskyy → Install
+
+> Pastikan Blynk **2.x** (bukan legacy 1.x)
+
+### Kode Dasar Koneksi
 
 ```cpp
+#define BLYNK_TEMPLATE_ID   "TMPLxxxxxx"
+#define BLYNK_TEMPLATE_NAME "Monitor DHT"
+#define BLYNK_AUTH_TOKEN    "YourAuthToken"
+
 #include <WiFi.h>
-#include <HTTPClient.h>
+#include <BlynkSimpleEsp32.h>
 #include <DHT.h>
 
-#define DHTPIN   4
-#define DHTTYPE  DHT11
+char ssid[] = "NAMA_WIFI";
+char pass[] = "PASSWORD_WIFI";
 
-const char* ssid     = "NAMA_WIFI";
-const char* password = "PASSWORD_WIFI";
-String apiKey        = "YOUR_API_KEY";   // dari tab API Keys ThingSpeak
-
-DHT dht(DHTPIN, DHTTYPE);
+DHT dht(4, DHT11);
+BlynkTimer timer;
 
 void setup() {
   Serial.begin(115200);
   dht.begin();
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500); Serial.print(".");
-  }
-  Serial.println("\nWiFi Terhubung!");
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
 }
 
 void loop() {
+  Blynk.run();
+  timer.run();
+}
+```
+
+---
+
+## 3. Kirim Data DHT ke Blynk `[0:40 – 1:00]`
+
+```cpp
+void kirimSensor() {
   float suhu       = dht.readTemperature();
   float kelembapan = dht.readHumidity();
 
-  if (!isnan(suhu) && !isnan(kelembapan)) {
-    HTTPClient http;
-    String url = "http://api.thingspeak.com/update?api_key=" + apiKey
-               + "&field1=" + String(suhu)
-               + "&field2=" + String(kelembapan);
-    http.begin(url);
-    int code = http.GET();
-    Serial.println("HTTP: " + String(code));  // 200 = sukses
-    http.end();
+  if (isnan(suhu) || isnan(kelembapan)) {
+    Serial.println("Gagal baca sensor!");
+    return;
   }
-  delay(15000);  // ThingSpeak limit: min 15 detik
+
+  Blynk.virtualWrite(V0, suhu);        // → Gauge Suhu di app
+  Blynk.virtualWrite(V1, kelembapan);  // → Gauge Kelembapan di app
+
+  Serial.print("Suhu: ");       Serial.println(suhu);
+  Serial.print("Kelembapan: "); Serial.println(kelembapan);
 }
+
+// Di setup(), daftarkan timer:
+timer.setInterval(2000L, kirimSensor);  // kirim tiap 2 detik
 ```
+
+Buka Blynk app → angka suhu & kelembapan update otomatis di Gauge.
 
 ---
 
-## 3. Pilih Aktuator `[0:50 – 1:20]`
+## 4. Aktuator — LED RGB + Buzzer `[1:00 – 1:40]`
 
-| Aktuator | Trigger | Komponen |
-|----------|---------|----------|
-| Relay + Kipas DC | Suhu > 33°C | Relay module + kipas |
-| Buzzer Alarm | Suhu > 40°C | Buzzer aktif/pasif |
-| Servo Motor | Suhu > 35°C → buka | SG90 servo |
-| Pompa Air | Kelembapan < 40% | Mini pump + relay |
-| LED RGB | Indikator warna suhu | LED RGB / WS2812 |
-| Relay + Pemanas | Suhu < 37°C | Bohlam kecil + relay |
+### Kondisi & Aksi
 
-> Semua logika sama: `if (kondisi) → digitalWrite(PIN, HIGH/LOW)` — beda hanya threshold dan pin.
+| Kondisi Suhu | LED RGB | Blynk App |
+|-------------|---------|-----------|
+| < 28°C | Biru (sejuk) | LED widget biru |
+| 28–35°C | Hijau (normal) | LED widget hijau |
+| > 35°C | Merah (panas) | LED widget merah |
 
-### Kode Relay (Paling Umum)
+| Kondisi | Buzzer |
+|---------|--------|
+| Suhu > 38°C atau Kelembapan < 30% | ON (alarm) |
+| Kondisi normal | OFF |
 
-Wiring:
+---
+
+### Wiring LED RGB (Common Cathode)
+
 ```
-VCC  →  5V
-GND  →  GND
-IN   →  GPIO 5
+R (merah)         →  GPIO 25  via resistor 220Ω
+G (hijau)         →  GPIO 26  via resistor 220Ω
+B (biru)          →  GPIO 27  via resistor 220Ω
+GND (kaki panjang)→  GND
 ```
 
-Kode:
+### Wiring Buzzer Aktif
+
+```
+VCC (+)  →  GPIO 18
+GND (-)  →  GND
+```
+
+> Buzzer **aktif** langsung bunyi saat dapat sinyal HIGH.
+> Buzzer **pasif** perlu fungsi `tone()` dengan frekuensi.
+
+---
+
+### Kode: Define Pin
+
 ```cpp
-#define RELAY_PIN 5
+#define PIN_R    25
+#define PIN_G    26
+#define PIN_B    27
+#define PIN_BUZZ 18
 
 // di setup():
-pinMode(RELAY_PIN, OUTPUT);
-digitalWrite(RELAY_PIN, HIGH);  // relay OFF dulu (active LOW)
+pinMode(PIN_R,    OUTPUT);
+pinMode(PIN_G,    OUTPUT);
+pinMode(PIN_B,    OUTPUT);
+pinMode(PIN_BUZZ, OUTPUT);
 
-// di loop(), setelah baca sensor:
-if (suhu > 33.0) {
-  digitalWrite(RELAY_PIN, LOW);   // relay ON → kipas nyala
-} else {
-  digitalWrite(RELAY_PIN, HIGH);  // relay OFF
-}
+// Matikan semua dulu:
+digitalWrite(PIN_R,    LOW);
+digitalWrite(PIN_G,    LOW);
+digitalWrite(PIN_B,    LOW);
+digitalWrite(PIN_BUZZ, LOW);
 ```
-
-> **Active LOW:** LOW = relay ON, HIGH = relay OFF. Kebalikan dari LED biasa.
 
 ---
 
-## 4. Integrasi Penuh — Satu Sketch `[1:20 – 1:40]`
-
-Struktur kode yang rapi — pisah jadi fungsi:
+### Kode: Logika Aktuator + Update Blynk
 
 ```cpp
-// Deklarasi global: DHT, WiFi, relay, apiKey
+void kontrolAktuator(float suhu, float kelembapan) {
 
-float suhu, kelembapan;
+  // ── LED RGB ──────────────────────────────────
+  if (suhu < 28.0) {                    // Sejuk → Biru
+    digitalWrite(PIN_R, LOW);  digitalWrite(PIN_G, LOW);  digitalWrite(PIN_B, HIGH);
+    Blynk.virtualWrite(V2, 1);
+  } else if (suhu <= 35.0) {            // Normal → Hijau
+    digitalWrite(PIN_R, LOW);  digitalWrite(PIN_G, HIGH); digitalWrite(PIN_B, LOW);
+    Blynk.virtualWrite(V2, 255);
+  } else {                              // Panas → Merah
+    digitalWrite(PIN_R, HIGH); digitalWrite(PIN_G, LOW);  digitalWrite(PIN_B, LOW);
+    Blynk.virtualWrite(V2, 255);
+  }
 
-void bacaSensor() {
-  suhu       = dht.readTemperature();
-  kelembapan = dht.readHumidity();
+  // ── Buzzer ───────────────────────────────────
+  bool alarm = (suhu > 38.0) || (kelembapan < 30.0);
+  digitalWrite(PIN_BUZZ, alarm ? HIGH : LOW);
+  Blynk.virtualWrite(V3, alarm ? 255 : 0);  // update LED widget buzzer
 }
 
-void kontrolAktuator() {
-  digitalWrite(RELAY_PIN, suhu > 33.0 ? LOW : HIGH);
+// Panggil dari kirimSensor() setelah virtualWrite:
+kontrolAktuator(suhu, kelembapan);
+```
+
+---
+
+## 5. Kode Lengkap (Ringkasan)
+
+```cpp
+// ① Defines & includes
+#define BLYNK_TEMPLATE_ID   "TMPLxxxxxx"
+#define BLYNK_TEMPLATE_NAME "Monitor DHT"
+#define BLYNK_AUTH_TOKEN    "YourAuthToken"
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <DHT.h>
+
+// ② Pin & objek
+DHT dht(4, DHT11);
+BlynkTimer timer;
+#define PIN_R 25  
+#define PIN_G 26  
+#define PIN_B 27  
+#define PIN_BUZZ 18
+
+// ③ Fungsi utama
+void kirimSensor() {
+  float s = dht.readTemperature(), h = dht.readHumidity();
+  if (isnan(s) || isnan(h)) return;
+  Blynk.virtualWrite(V0, s);
+  Blynk.virtualWrite(V1, h);
+  kontrolAktuator(s, h);
 }
 
-void kirimData() {
-  if (WiFi.status() != WL_CONNECTED) return;
-  HTTPClient http;
-  String url = "http://api.thingspeak.com/update?api_key=" + apiKey
-             + "&field1=" + String(suhu)
-             + "&field2=" + String(kelembapan);
-  http.begin(url); http.GET(); http.end();
+// ④ Setup & loop
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+  pinMode(PIN_R, OUTPUT); pinMode(PIN_G, OUTPUT);
+  pinMode(PIN_B, OUTPUT); pinMode(PIN_BUZZ, OUTPUT);
+  Blynk.begin(BLYNK_AUTH_TOKEN, "SSID", "PASS");
+  timer.setInterval(2000L, kirimSensor);
 }
 
 void loop() {
-  bacaSensor();
-  if (!isnan(suhu)) {
-    kontrolAktuator();
-    kirimData();
-  }
-  delay(15000);
+  Blynk.run();
+  timer.run();
 }
 ```
 
 ---
 
-## 5. Bentuk Kelompok + Tentukan Project `[1:40 – 2:00]`
-
-Isi template ini sekarang:
+## 6. Bentuk Kelompok + Tentukan Project `[1:40 – 2:00]`
 
 ```
-Nama Project  : _______________
-Sensor        : DHT11 / DHT22
-Aktuator      : _______________
-Kondisi ON    : Suhu > ___ °C / Kelembapan < ___ %
-Monitoring    : ThingSpeak
-Channel ID    : _______________
+Nama Project   : _______________
+Sensor         : DHT11 / DHT22
+Aktuator       : LED RGB + Buzzer + ___
+Trigger LED    :
+  Biru  < ___ °C
+  Hijau ___ – ___ °C
+  Merah > ___ °C
+Trigger Buzzer : Suhu > ___ °C / Kelembapan < ___ %
+Monitoring     : Blynk (V0–V3)
 
-Pembagian Kerja:
-  - Hardware  : _______________
-  - Kode      : _______________
-  - Presentasi: _______________
+Hardware       : _______________
+Kode           : _______________
+Presentasi     : _______________
 ```
 
-### Ide Project Siap Pakai
+### Ide Variasi Project
 
-| Project | Aktuator | Trigger |
-|---------|----------|---------|
-| 🌱 Smart Greenhouse | Pompa + kipas | Kelembapan < 40% / Suhu > 35°C |
-| 🏠 Smart Room Comfort | Kipas + LED RGB | Skor kenyamanan |
-| 👶 Baby Room Monitor | Buzzer | Suhu < 20°C atau > 32°C |
-| 🖥 Server Room Cooler | Relay kipas | Suhu > 40°C |
-| 🧫 Inkubator | Relay pemanas + kipas | Suhu < 37°C / > 39°C |
+| Project | Aktuator Tambahan | Twist |
+|---------|------------------|-------|
+| 🌱 Smart Greenhouse | Relay pompa | LED merah + buzzer = darurat |
+| 👶 Baby Room Monitor | - | LED biru = nyaman, buzzer > 32°C |
+| 🖥 Server Room Alert | Relay kipas | Buzzer + notif Blynk > 40°C |
+| 🏠 Smart Room Comfort | - | LED sesuai comfort score |
 
 ---
 
@@ -211,21 +306,21 @@ Pembagian Kerja:
 
 | Error | Penyebab | Solusi |
 |-------|----------|--------|
-| WiFi terus print `"....."` | SSID/password salah, atau jaringan 5GHz | Cek kredensial, pakai hotspot HP (2.4GHz) |
-| HTTP response `-1` atau `0` | Tidak ada internet / API Key salah | Cek koneksi, pastikan pakai Write Key bukan Read Key |
-| ThingSpeak grafik tidak update | Delay terlalu cepat < 15 detik | Set `delay(15000)` minimal |
-| Relay ON terus tidak bisa mati | Lupa active LOW | `HIGH` = OFF, `LOW` = ON untuk relay module |
-| ESP32 restart terus (watchdog) | Loop diblok terlalu lama | Tambahkan `delay()` atau `yield()` |
+| `Blynk.begin()` stuck | SSID/password salah / WiFi 5GHz / Token salah | Cek kredensial, pakai hotspot 2.4GHz |
+| Gauge tidak update | Datastream V0/V1 belum dibuat | Buat di Template → Datastreams |
+| LED RGB satu warna saja | Common Anode/Cathode salah | Common Cathode: GND ke ground, Common Anode: logika terbalik |
+| Buzzer tidak bunyi | Buzzer pasif perlu `tone()` | Pastikan pakai buzzer aktif, atau ganti ke `tone(PIN_BUZZ, 1000)` |
+| "Template not found" | BLYNK_TEMPLATE_ID salah | Copy persis dari halaman Template di blynk.cloud |
 
 ---
 
 ## Recap Hari 2
 
-- [x] Buat channel ThingSpeak + dapat API Key
-- [x] Konek ESP32 ke WiFi
-- [x] Kirim data suhu & kelembapan ke ThingSpeak real-time
-- [x] Hubungkan relay / buzzer / aktuator pilihan
-- [x] Integrasi penuh dalam satu sketch terstruktur
-- [x] Kelompok terbentuk + project sudah ditentukan
+- [x] Setup Blynk — Template, Datastream, Auth Token
+- [x] Konek ESP32 ke Blynk via WiFi
+- [x] Kirim suhu & kelembapan ke Gauge widget di HP real-time
+- [x] LED RGB berubah warna otomatis sesuai kondisi suhu
+- [x] Buzzer alarm otomatis + status tampil di Blynk app
+- [x] Kelompok terbentuk + project dikonfirmasi
 
 **Hari 3:** Finishing project + Demo hardware hidup + Presentasi kelompok
